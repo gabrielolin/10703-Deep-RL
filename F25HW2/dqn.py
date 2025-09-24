@@ -44,7 +44,7 @@ class ReplayMemory():
 
 
 class DeepQNetwork(nn.Module):
-    def __init__(self, state_size, action_size, double_dqn, lr_q_net=2e-4, gamma=0.99, epsilon=0.05, target_update=50, burn_in=10000, replay_buffer_size=50000, replay_buffer_batch_size=32, device='gpu'):
+    def __init__(self, state_size, action_size, double_dqn, lr_q_net=2e-4, gamma=0.99, epsilon=0.05, target_update=50, burn_in=10000, replay_buffer_size=50000, replay_buffer_batch_size=32, device='cpu'):
         super(DeepQNetwork, self).__init__()
 
         # define init params
@@ -124,6 +124,7 @@ class DeepQNetwork(nn.Module):
     def train(self, replay_batch):
         # train the q network given the replay batch
         states, actions, rewards, next_states, dones = zip(*replay_batch)
+        # make sure replay batch on device
         states = torch.cat(states).to(self.device)
         actions = torch.cat(actions).to(self.device)
         rewards = torch.cat(rewards).to(self.device)
@@ -158,20 +159,20 @@ class DeepQNetwork(nn.Module):
             episode_reward = 0
 
             for step in range(max_steps):
-                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-                action = self.get_action(state_tensor, stochastic=train)
+                action = self.get_action(state, stochastic=train)
                 next_state, reward, done, _, _ = env.step(action)
 
+                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                action_tensor = torch.tensor([action]).to(self.device)
+                reward_tensor = torch.tensor([reward]).to(self.device)
+                next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0).to(self.device)
+                
                 # Store transition
-                state = state_tensor
-                action = torch.tensor([action]).to(self.device)
-                reward = torch.tensor([reward]).to(self.device)
-                next_state = torch.FloatTensor(next_state).unsqueeze(0).to(self.device)
-                self.replay_memory.append((state, action, reward, next_state, done))
+                self.replay_memory.append((state_tensor, action_tensor, reward_tensor, next_state_tensor, done))
 
-                episode_reward += reward.item()
+                episode_reward += reward
 
-                state = next_state
+                state = next_state  
 
                 if train:
                     #update Q net after every step
@@ -245,12 +246,10 @@ def main():
 
     env = gym.make(args.env_name)
 
-
-
-    num_trials = 5
+    num_trials = args.num_runs
     num_frozen = args.num_episodes // args.test_frequency
     training_episodes = args.test_frequency
-    testing_episodes = args.num_test_episodes
+    testing_episodes = 20
 
     #Log matrix for average rewards
     D = np.zeros((num_trials, num_frozen))
@@ -265,17 +264,26 @@ def main():
         action_size = env.action_space.n
         state_size = env.observation_space.shape[0] 
         #initialize DQN agent   
-        dqn = DeepQNetwork(state_size=state_size, action_size=action_size, double_dqn=args.double_dqn, device='gpu')
+        dqn = DeepQNetwork(state_size=state_size, action_size=action_size, double_dqn=args.double_dqn, device='cuda' if torch.cuda.is_available() else 'cpu')
 
         #initialize memory with random policy
-        for _ in range(dqn.burn_in):
-            state, _ = env.reset()
-            done = False
-            while not done:
-                action = env.action_space.sample()
-                next_state, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-                dqn.replay_memory.append((state, action, reward, next_state, done))
+        state, _ = env.reset()
+        for step in range(dqn.burn_in):
+            action = env.action_space.sample()
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            
+            # Convert to tensors for storage
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(dqn.device)
+            action_tensor = torch.tensor([action]).to(dqn.device)
+            reward_tensor = torch.tensor([reward]).to(dqn.device)
+            next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0).to(dqn.device)
+            
+            dqn.replay_memory.append((state_tensor, action_tensor, reward_tensor, next_state_tensor, done))
+            
+            if done:
+                state, _ = env.reset()
+            else:
                 state = next_state
 
         for i in range(num_frozen):
@@ -287,7 +295,7 @@ def main():
             print(f"Episode {(i+1)*training_episodes}: Average test reward = {np.mean(test_rewards):.2f}")
 
         # Save D matrix after each trial
-        filename_suffix = f"{args.mode}" + (f"_n{args.n}" if args.n != 0 else "")
+        filename_suffix = f"{'Double_' if args.double_dqn else ''}DQN"
         np.save(os.path.join(data_path, f'D_matrix_{filename_suffix}_trial_{trial}.npy'), D)
         print(f"Saved D matrix after trial {trial+1}")
 
@@ -296,7 +304,7 @@ def main():
         print(f"Saved agent after trial {trial+1}")
 
     # Save final D matrix
-    filename_suffix = f"{args.mode}" + (f"_n{args.n}" if args.n != 0 else "")
+    filename_suffix = f"{'Double_' if args.double_dqn else ''}DQN"
     np.save(os.path.join(data_path, f'D_matrix_{filename_suffix}_final.npy'), D)
     print("Saved final D matrix")
 
@@ -307,14 +315,13 @@ def main():
 
     graph_agents(
         graph_name=f"{'Double ' if args.double_dqn else ''}DQN on {args.env_name}",
-        mean_undiscounted_returns=D,  # Use the D matrix that was calculated
+        mean_undiscounted_returns=D,
         test_frequency=args.test_frequency,
         max_steps=args.max_steps,
         num_episodes=args.num_episodes
     )
 
     # END STUDENT SOLUTION
-
 
 
 if '__main__' == __name__:
